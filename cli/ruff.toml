@@ -1,0 +1,7 @@
+# envctl must run on Python 3.9 with the standard library only.
+line-length = 100
+target-version = "py39"
+include = ["envctl"]
+
+[lint]
+select = ["E", "F", "W", "I", "B", "S", "SIM", "C4"]

@@ -1,0 +1,216 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.13"
+  TRIVY_VERSION: v0.76.2
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: control-plane/requirements-dev.txt
+      - name: Install lint tooling (pinned)
+        run: python -m pip install -r control-plane/requirements-dev.txt
+      - name: yamllint --strict
+        run: yamllint --strict .
+      - name: ruff
+        run: |
+          cd control-plane && ruff check . && ruff format --check . && cd ..
+          ruff check --config cli/ruff.toml cli/envctl scripts/sign-slack-request.py workload-template/main.py
+      - name: mypy --strict
+        run: cd control-plane && mypy
+      - name: shellcheck -x
+        run: shellcheck -x scripts/*.sh
+      - name: hadolint
+        uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
+        with:
+          recursive: true
+      - name: docker compose config
+        run: |
+          docker compose --env-file .env.example -f docker-compose.yml config --quiet
+          docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.demo.yml config --quiet
+
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: control-plane/requirements-dev.txt
+      - run: python -m pip install -r control-plane/requirements-dev.txt
+      - name: pytest (coverage gate 85%)
+        run: cd control-plane && python -m pytest --cov --cov-report=term-missing
+
+  cli-compat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      matrix:
+        python: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: envctl runs on stdlib only
+        run: |
+          python cli/envctl --help
+          rc=0; ENVCTL_TOKEN=x python cli/envctl --url http://127.0.0.1:9 list || rc=$?
+          test "$rc" = 1
+          rc=0; python cli/envctl list || rc=$?
+          test "$rc" = 2
+
+  trivy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Repository (vulnerabilities, secrets, misconfigurations)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          trivyignores: .trivyignore.yaml
+          exit-code: "1"
+      - name: Build images
+        run: |
+          cp .env.example .env
+          docker compose --profile images build
+          docker compose pull docker-proxy-ro
+      - name: Scan control-plane image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          skip-setup-trivy: true
+          scan-type: image
+          image-ref: ephemeral-idp/control-plane:0.1.0
+          scanners: vuln,secret
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          trivyignores: .trivyignore.yaml
+          exit-code: "1"
+      - name: Scan workload image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          skip-setup-trivy: true
+          scan-type: image
+          image-ref: ephemeral-idp/workload:0.1.0
+          scanners: vuln,secret
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          trivyignores: .trivyignore.yaml
+          exit-code: "1"
+      - name: Scan postgres image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          skip-setup-trivy: true
+          scan-type: image
+          image-ref: ephemeral-idp/postgres:17.11-alpine-p1
+          scanners: vuln,secret
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          trivyignores: .trivyignore.yaml
+          exit-code: "1"
+      - name: Scan traefik image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          skip-setup-trivy: true
+          scan-type: image
+          image-ref: ephemeral-idp/traefik:0.1.0
+          scanners: vuln,secret
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          trivyignores: .trivyignore.yaml
+          exit-code: "1"
+      - name: Scan socket-proxy image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          skip-setup-trivy: true
+          scan-type: image
+          image-ref: wollomatic/socket-proxy:1.13.2
+          scanners: vuln,secret
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          trivyignores: .trivyignore.yaml
+          exit-code: "1"
+
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: [lint, unit]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: control-plane/requirements-dev.txt
+      - run: python -m pip install -r control-plane/requirements-dev.txt
+      - name: doctor + env
+        run: |
+          make doctor
+          make env
+          grep DOCKER_SOCKET_GID .env
+      - name: demo (stack with the demo overlay + lifecycle script)
+        run: make demo
+      - name: integration tests against the live stack
+        run: cd control-plane && python -m pytest -m integration -p no:cacheprovider --no-cov
+      - name: resource snapshot
+        if: always()
+        run: make stats || true
+      - name: collect logs
+        if: failure()
+        run: |
+          mkdir -p artifacts
+          docker compose -f docker-compose.yml -f docker-compose.demo.yml logs --no-color > artifacts/compose.log 2>&1 || true
+          docker ps -a > artifacts/docker-ps.txt 2>&1 || true
+      - name: upload logs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-logs
+          path: artifacts/
+          retention-days: 7
+      - name: down
+        if: always()
+        run: make down

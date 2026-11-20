@@ -1,0 +1,9 @@
+# Demo overlay: short TTLs and a fast reaper so the whole lifecycle fits in
+# a couple of minutes. `gmake demo` applies it automatically.
+services:
+  control-plane:
+    environment:
+      MIN_TTL_SECONDS: "10"
+      RECONCILE_INTERVAL_SECONDS: "1"
+      ORPHAN_GRACE_SECONDS: "5"
+      PROVISION_TIMEOUT_SECONDS: "90"

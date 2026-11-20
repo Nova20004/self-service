@@ -1,0 +1,36 @@
+# Static configuration for the edge router. Baked into the image by
+# traefik/Dockerfile so no host path is ever bind-mounted.
+global:
+  checkNewVersion: false
+  sendAnonymousUsage: false
+
+# No `api:` section: the API and dashboard stay disabled.
+
+entryPoints:
+  web:
+    # Unprivileged port inside the container; published on
+    # 127.0.0.1:${EDGE_PORT} by docker-compose.yml.
+    address: ":8081"
+  ping:
+    address: "127.0.0.1:8082"
+
+ping:
+  entryPoint: ping
+
+providers:
+  docker:
+    # Read-only, allowlisted view of the Docker API (never the raw socket).
+    endpoint: "tcp://docker-proxy-ro:2375"
+    exposedByDefault: false
+    constraints: "Label(`managed-by`, `ephemeral-idp`)"
+    watch: true
+
+log:
+  level: INFO
+  format: json
+
+accessLog:
+  format: json
+  fields:
+    headers:
+      defaultMode: drop

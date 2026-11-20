@@ -1,0 +1,59 @@
+[project]
+name = "ephemeral-idp-control-plane"
+version = "0.1.0"
+description = "Control plane for self-service ephemeral environments"
+requires-python = ">=3.13"
+license = "MIT"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers -m 'not integration'"
+markers = [
+    "integration: needs the real stack (Docker + compose); run in the e2e job only",
+]
+
+[tool.coverage.run]
+source = ["app"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 85
+show_missing = true
+skip_covered = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "\\.\\.\\.$",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "SIM", "RUF", "PL", "C4"]
+ignore = [
+    "PLR0913",  # constructors take explicit dependencies on purpose
+    "PLR2004",  # HTTP status codes read better inline
+    "PLR0911",
+    "PLR0912",
+    "PLR0915",
+    "PLR0917",
+    "S608",     # SQL fragments are built from constants, values are bound
+    "S108",     # "/tmp" strings are tmpfs mount targets inside containers
+    "RUF012",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106", "PLC0415", "S311", "S310", "S603", "S607"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+warn_unreachable = true
+files = ["app", "tests"]
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disallow_untyped_defs = false
+disallow_incomplete_defs = false

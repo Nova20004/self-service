@@ -1,0 +1,178 @@
+# ephemeral-idp platform stack. Start with `gmake up` (or `gmake demo`).
+#
+# Docker API access is split across two socket-proxy instances (ADR-0003):
+#   docker-proxy-ro -> Traefik only, GET/HEAD discovery endpoints
+#   docker-proxy-rw -> control plane only, the exact calls the provisioner makes
+# Those two containers are the ONLY ones that mount the Docker socket (read-only).
+# socket-proxy anchors every allowlist regex itself (^...$).
+name: ephemeral-idp
+
+# Built from postgres/Dockerfile (pinned upstream digest + Alpine security fixes).
+x-db-image: &db_image ephemeral-idp/postgres:17.11-alpine-p1
+x-socket-proxy-image: &socket_proxy_image wollomatic/socket-proxy:1.13.2@sha256:ff95d6ff6c27853005ef85eb8f4ab5923dc3d2f1e055f98fb6aeeaceec3fe848
+
+x-hardening: &hardening
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options: {max-size: "5m", max-file: "2"}
+
+x-docker-socket: &docker_socket
+  type: bind
+  source: /var/run/docker.sock
+  target: /var/run/docker.sock
+  read_only: true
+
+services:
+  docker-proxy-ro:
+    <<: *hardening
+    image: *socket_proxy_image
+    container_name: eidp-docker-proxy-ro
+    # 65534 = nobody; the group must own the socket (0 on Docker Desktop,
+    # the `docker` group on Linux). `make env` detects it.
+    user: "65534:${DOCKER_SOCKET_GID:-0}"
+    mem_limit: 32m
+    memswap_limit: 32m
+    pids_limit: 32
+    cpus: 0.25
+    command:
+      - -listenip=0.0.0.0
+      - -allowfrom=traefik
+      - -allowHEAD=/(v1\.[0-9]+/)?_ping
+      - -allowGET=/(v1\.[0-9]+/)?(_ping|version|events|containers/json|containers/[a-zA-Z0-9_.-]+/json|networks|networks/[a-zA-Z0-9_.-]+)
+      - -allowhealthcheck
+      - -watchdoginterval=30
+      - -stoponwatchdog
+      - -shutdowngracetime=5
+      - -logjson
+    volumes:
+      - *docker_socket
+    networks: [docker-ro]
+    healthcheck:
+      test: ["CMD", "./healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  docker-proxy-rw:
+    <<: *hardening
+    image: *socket_proxy_image
+    container_name: eidp-docker-proxy-rw
+    user: "65534:${DOCKER_SOCKET_GID:-0}"
+    mem_limit: 32m
+    memswap_limit: 32m
+    pids_limit: 32
+    cpus: 0.25
+    command:
+      - -listenip=0.0.0.0
+      - -allowfrom=control-plane
+      - -allowHEAD=/(v1\.[0-9]+/)?_ping
+      - -allowGET=/(v1\.[0-9]+/)?(_ping|version|containers/json|containers/[a-zA-Z0-9_.-]+/(json|logs)|networks|networks/[a-zA-Z0-9_.-]+|volumes|images/[a-zA-Z0-9_./:@-]+/json)
+      - -allowPOST=/(v1\.[0-9]+/)?(containers/create|containers/[a-zA-Z0-9_.-]+/(start|stop|kill)|networks/create|networks/[a-zA-Z0-9_.-]+/(connect|disconnect)|volumes/create)
+      - -allowDELETE=/(v1\.[0-9]+/)?(containers|networks|volumes)/[a-zA-Z0-9_.-]+
+      # Deny every host bind mount: the only permitted source is a path that
+      # does not exist on any host.
+      - -allowbindmountfrom=/var/empty/ephemeral-idp-no-bind-mounts
+      - -allowhealthcheck
+      - -watchdoginterval=30
+      - -stoponwatchdog
+      - -shutdowngracetime=5
+      - -logjson
+    volumes:
+      - *docker_socket
+    networks: [docker-rw]
+    healthcheck:
+      test: ["CMD", "./healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  traefik:
+    <<: *hardening
+    build: ./traefik
+    image: ephemeral-idp/traefik:0.1.0
+    container_name: eidp-traefik
+    mem_limit: 64m
+    memswap_limit: 64m
+    pids_limit: 64
+    cpus: 0.5
+    ports:
+      - "127.0.0.1:${EDGE_PORT:-8080}:8081"
+    networks: [edge, docker-ro]
+    depends_on:
+      docker-proxy-ro:
+        condition: service_healthy
+
+  control-plane:
+    <<: *hardening
+    build: ./control-plane
+    image: ephemeral-idp/control-plane:0.1.0
+    container_name: eidp-control-plane
+    mem_limit: 96m
+    memswap_limit: 96m
+    pids_limit: 64
+    cpus: 0.5
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    ports:
+      - "127.0.0.1:${API_PORT:-8000}:8000"
+    environment:
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?run `make env` first}
+      OWNER_TOKENS: ${OWNER_TOKENS:?run `make env` first}
+      SLACK_SIGNING_SECRET: ${SLACK_SIGNING_SECRET:?run `make env` first}
+      DOCKER_HOST_URL: http://docker-proxy-rw:2375
+      TRAEFIK_CONTAINER: eidp-traefik
+      EDGE_PORT: ${EDGE_PORT:-8080}
+      BASE_DOMAIN: ${BASE_DOMAIN:-localhost}
+      APP_IMAGE: ephemeral-idp/workload:0.1.0
+      DB_IMAGE: *db_image
+      MIN_TTL_SECONDS: ${MIN_TTL_SECONDS:-60}
+      MAX_TTL_HOURS: ${MAX_TTL_HOURS:-48}
+      MAX_TOTAL_LIFETIME_HOURS: ${MAX_TOTAL_LIFETIME_HOURS:-72}
+      MAX_ENVS_PER_OWNER: ${MAX_ENVS_PER_OWNER:-3}
+      MAX_ENVS_TOTAL: ${MAX_ENVS_TOTAL:-10}
+      MAX_TOTAL_MEMORY_MB: ${MAX_TOTAL_MEMORY_MB:-1024}
+      COST_PER_GB_HOUR: ${COST_PER_GB_HOUR:-0.01}
+      RECONCILE_INTERVAL_SECONDS: ${RECONCILE_INTERVAL_SECONDS:-3}
+      PROVISION_TIMEOUT_SECONDS: ${PROVISION_TIMEOUT_SECONDS:-120}
+      ORPHAN_GRACE_SECONDS: ${ORPHAN_GRACE_SECONDS:-60}
+    volumes:
+      - state:/data
+    networks: [api, docker-rw]
+    depends_on:
+      docker-proxy-rw:
+        condition: service_healthy
+      traefik:
+        condition: service_healthy
+
+  # Build-only services: never started, they exist so that `make up` builds
+  # the per-environment images up front (the control plane is not allowed to
+  # pull or build images through its proxy).
+  workload-image:
+    profiles: [images]
+    build: ./workload-template
+    image: ephemeral-idp/workload:0.1.0
+
+  db-image:
+    profiles: [images]
+    build: ./postgres
+    image: *db_image
+
+networks:
+  edge:
+    name: eidp-edge
+  api:
+    name: eidp-api
+  docker-ro:
+    name: eidp-docker-ro
+    internal: true
+  docker-rw:
+    name: eidp-docker-rw
+    internal: true
+
+volumes:
+  state:
+    name: eidp-state

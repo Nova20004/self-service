@@ -1,0 +1,28 @@
+# Every accepted finding is listed here with a justification and an expiry
+# date. CI fails on any CRITICAL/HIGH not in this file (with --ignore-unfixed).
+# Review on expiry: upgrade the pinned image or renew with a new statement.
+vulnerabilities:
+  - id: CVE-2026-97054
+    paths:
+      - "usr/local/bin/traefik"
+      - "socket-proxy"
+      - "healthcheck"
+    statement: >-
+      Go stdlib net/http MaxBytesReader issue compiled into the upstream
+      Traefik v3.7.17 and socket-proxy 1.13.2 binaries; only fixable by an
+      upstream rebuild (Go 1.27.4). Traefik is published on 127.0.0.1 only and
+      socket-proxy listens on internal networks reachable by a single allowed
+      client. Traefik v3.7.18+ is excluded by the 14-day release-age rule.
+    expired_at: 2026-12-31
+  - id: CVE-2026-125350
+    statement: >-
+      libxslt in the Alpine 3.24 postgres image; the fixed package (1.1.43-r4)
+      is not yet in the alpine v3.24 repository. Only the contrib xml2
+      extension uses libxslt and it is never created in environment databases.
+    expired_at: 2026-12-31
+  - id: CVE-2026-87636
+    statement: Same libxslt package and rationale as CVE-2026-125350.
+    expired_at: 2026-12-31
+  - id: CVE-2026-9947
+    statement: Same libxslt package and rationale as CVE-2026-125350.
+    expired_at: 2026-12-31

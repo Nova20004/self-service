@@ -1,0 +1,271 @@
+#!/usr/bin/env python3
+"""envctl - self-service ephemeral environments from your terminal.
+
+Standard library only; works on Python >= 3.9. Configuration comes from
+ENVCTL_URL / ENVCTL_TOKEN, or from an env file (--env-file) containing those
+keys.
+
+Exit codes: 0 ok, 1 error, 2 usage, 3 quota exceeded, 4 authentication or
+authorization failure.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from typing import Any, Dict, List, Optional, Tuple
+
+EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_QUOTA, EXIT_AUTH = 0, 1, 2, 3, 4
+DEFAULT_URL = "http://127.0.0.1:8000"
+TERMINAL = {"RUNNING", "FAILED", "DROPPED", "DROP_FAILED"}
+
+
+class CliError(Exception):
+    def __init__(self, message: str, code: int = EXIT_ERROR, body: Any = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.body = body
+
+
+def load_env_file(path: str) -> Dict[str, str]:
+    values: Dict[str, str] = {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                values[key.strip()] = value.strip().strip("'\"")
+    except OSError as exc:
+        raise CliError(f"cannot read env file {path}: {exc}", EXIT_USAGE) from exc
+    return values
+
+
+class Client:
+    def __init__(self, url: str, token: str, timeout: float = 15.0) -> None:
+        self.url = url.rstrip("/")
+        self.token = token
+        self.timeout = timeout
+
+    def call(self, method: str, path: str, body: Optional[Dict[str, Any]] = None) -> Any:
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(self.url + path, data=data, method=method)  # noqa: S310
+        req.add_header("Accept", "application/json")
+        if data is not None:
+            req.add_header("Content-Type", "application/json")
+        if self.token:
+            req.add_header("Authorization", f"Bearer {self.token}")
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:  # noqa: S310
+                raw = resp.read()
+                return json.loads(raw) if raw else {}
+        except urllib.error.HTTPError as exc:
+            raw = exc.read()
+            try:
+                problem = json.loads(raw)
+            except ValueError:
+                problem = {"detail": raw.decode(errors="replace") or exc.reason}
+            detail = problem.get("detail") or exc.reason
+            if exc.code in (401, 403):
+                hint = " (check ENVCTL_TOKEN)" if exc.code == 401 else ""
+                raise CliError(f"{exc.code}: {detail}{hint}", EXIT_AUTH, problem) from None
+            if exc.code == 429:
+                retry = exc.headers.get("Retry-After")
+                extra = f" (retry after {retry}s)" if retry else ""
+                raise CliError(f"quota exceeded: {detail}{extra}", EXIT_QUOTA, problem) from None
+            if exc.code == 400:
+                raise CliError(f"invalid request: {detail}", EXIT_USAGE, problem) from None
+            raise CliError(f"{exc.code}: {detail}", EXIT_ERROR, problem) from None
+        except urllib.error.URLError as exc:
+            raise CliError(
+                f"cannot reach control plane at {self.url}: {exc.reason}. "
+                "Is the stack up (`gmake up`) and ENVCTL_URL correct?",
+                EXIT_ERROR,
+            ) from None
+
+
+def fmt_env_table(items: List[Dict[str, Any]]) -> str:
+    cols: List[Tuple[str, str]] = [
+        ("SLUG", "slug"), ("OWNER", "owner"), ("STATUS", "status"),
+        ("EXPIRES_AT", "expires_at"), ("URL", "url"),
+    ]
+    rows = [[str(item.get(key) or "") for _, key in cols] for item in items]
+    widths = [max([len(h)] + [len(r[i]) for r in rows]) for i, (h, _) in enumerate(cols)]
+    lines = ["  ".join(h.ljust(widths[i]) for i, (h, _) in enumerate(cols))]
+    lines += ["  ".join(c.ljust(widths[i]) for i, c in enumerate(r)) for r in rows]
+    return "\n".join(lines)
+
+
+def fmt_env(env: Dict[str, Any]) -> str:
+    keys = ["slug", "id", "owner", "branch", "status", "url", "created_at", "expires_at",
+            "hard_deadline", "extensions", "memory_mb", "estimated_hourly_cost",
+            "failure_reason", "dsn"]
+    width = max(len(k) for k in keys)
+    return "\n".join(f"{k.ljust(width)}  {env[k]}" for k in keys if env.get(k) is not None)
+
+
+def emit(args: argparse.Namespace, data: Any, human: str) -> None:
+    if args.json:
+        print(json.dumps(data, indent=2, sort_keys=True))
+    else:
+        print(human)
+
+
+def wait_for(client: Client, slug: str, timeout: float) -> Dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    env: Dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        env = client.call("GET", f"/v1/envs/{slug}")
+        if env.get("status") in TERMINAL:
+            return env
+        time.sleep(1)
+    raise CliError(f"timed out after {timeout:.0f}s; last status {env.get('status')}")
+
+
+def cmd_create(client: Client, args: argparse.Namespace) -> int:
+    env = client.call("POST", "/v1/envs", {"branch": args.branch, "ttl": args.ttl})
+    dsn = env.get("dsn")
+    if args.wait:
+        final = wait_for(client, env["slug"], args.timeout)
+        final["dsn"] = dsn
+        env = final
+    emit(args, env, fmt_env(env) + "\n\nThe DSN password is shown once and never stored.")
+    if env.get("status") == "FAILED":
+        return EXIT_ERROR
+    return EXIT_OK
+
+
+def cmd_list(client: Client, args: argparse.Namespace) -> int:
+    data = client.call("GET", "/v1/envs" + ("?all=true" if args.all else ""))
+    items = data.get("items", [])
+    emit(args, data, fmt_env_table(items) if items else "no environments")
+    return EXIT_OK
+
+
+def cmd_status(client: Client, args: argparse.Namespace) -> int:
+    env = client.call("GET", f"/v1/envs/{args.slug}")
+    emit(args, env, fmt_env(env))
+    return EXIT_OK
+
+
+def cmd_extend(client: Client, args: argparse.Namespace) -> int:
+    env = client.call("POST", f"/v1/envs/{args.slug}/extend", {"by": args.by})
+    note = " (capped at hard deadline)" if env.get("capped_at_hard_deadline") else ""
+    emit(args, env, f"{env['slug']}: expires_at {env.get('previous_expires_at')} -> "
+                    f"{env['expires_at']}{note}")
+    return EXIT_OK
+
+
+def cmd_delete(client: Client, args: argparse.Namespace) -> int:
+    env = client.call("DELETE", f"/v1/envs/{args.slug}")
+    if args.wait and env.get("status") not in ("DROPPED", "FAILED"):
+        deadline = time.monotonic() + args.timeout
+        while time.monotonic() < deadline and env.get("status") not in ("DROPPED", "FAILED"):
+            time.sleep(1)
+            env = client.call("GET", f"/v1/envs/{args.slug}")
+    emit(args, env, f"{env['slug']}: {env['status']}")
+    return EXIT_OK
+
+
+def cmd_audit(client: Client, args: argparse.Namespace) -> int:
+    data = client.call("GET", f"/v1/audit?limit={args.limit}")
+    lines = [
+        f"{e['ts']}  {e['actor']:<14} {e['action']:<22} {e.get('slug') or '-'}"
+        for e in data.get("items", [])
+    ]
+    emit(args, data, "\n".join(lines) if lines else "audit log is empty")
+    return EXIT_OK
+
+
+def cmd_psql(client: Client, args: argparse.Namespace) -> int:
+    env = client.call("GET", f"/v1/envs/{args.slug}")
+    if env.get("status") != "RUNNING":
+        raise CliError(f"{args.slug} is {env.get('status')}, not RUNNING")
+    docker = shutil.which("docker")
+    if docker is None:
+        raise CliError("docker CLI not found; `envctl psql` only works on the Docker host")
+    cmd = [docker, "exec", "-it", env["db_container"], "psql", "-U", "app", "-d", "app"]
+    if not sys.stdin.isatty():
+        cmd.remove("-it")
+        cmd.insert(2, "-i")
+    return subprocess.call(cmd)  # noqa: S603
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="envctl",
+        description="Self-service ephemeral environments.",
+        epilog="Exit codes: 0 ok, 1 error, 2 usage, 3 quota, 4 auth.",
+    )
+    parser.add_argument("--env-file", help="file with ENVCTL_URL / ENVCTL_TOKEN")
+    parser.add_argument("--url", help=f"control plane URL (default {DEFAULT_URL})")
+    parser.add_argument("--json", action="store_true", help="machine-readable output")
+    sub = parser.add_subparsers(dest="command", metavar="COMMAND")
+    sub.required = True
+
+    p = sub.add_parser("create", help="create an environment for a branch")
+    p.add_argument("branch")
+    p.add_argument("--ttl", default="24h", help="lifetime, e.g. 30m, 24h, 2d (default 24h)")
+    p.add_argument("--wait", action="store_true", help="block until RUNNING or FAILED")
+    p.add_argument("--timeout", type=float, default=180.0)
+    p.set_defaults(func=cmd_create)
+
+    p = sub.add_parser("list", help="list your environments (admin: all)")
+    p.add_argument("--all", action="store_true", help="include DROPPED/FAILED")
+    p.set_defaults(func=cmd_list)
+
+    p = sub.add_parser("status", help="show one environment")
+    p.add_argument("slug")
+    p.set_defaults(func=cmd_status)
+
+    p = sub.add_parser("extend", help="push the expiry back")
+    p.add_argument("slug")
+    p.add_argument("--by", required=True, help="duration, e.g. 2h")
+    p.set_defaults(func=cmd_extend)
+
+    p = sub.add_parser("delete", help="tear an environment down")
+    p.add_argument("slug")
+    p.add_argument("--wait", action="store_true", help="block until DROPPED")
+    p.add_argument("--timeout", type=float, default=120.0)
+    p.set_defaults(func=cmd_delete)
+
+    p = sub.add_parser("audit", help="show the audit log (admin)")
+    p.add_argument("--limit", type=int, default=20)
+    p.set_defaults(func=cmd_audit)
+
+    p = sub.add_parser("psql", help="open psql in the env database (same host only)")
+    p.add_argument("slug")
+    p.set_defaults(func=cmd_psql)
+    return parser
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    file_values = load_env_file(args.env_file) if args.env_file else {}
+    url = args.url or os.environ.get("ENVCTL_URL") or file_values.get("ENVCTL_URL") or DEFAULT_URL
+    token = os.environ.get("ENVCTL_TOKEN") or file_values.get("ENVCTL_TOKEN", "")
+    if not token:
+        print("envctl: ENVCTL_TOKEN is not set (export it or use --env-file)", file=sys.stderr)
+        return EXIT_USAGE
+    try:
+        return int(args.func(Client(url, token), args))
+    except CliError as exc:
+        if args.json and exc.body is not None:
+            print(json.dumps({"error": str(exc), "problem": exc.body}, indent=2))
+        print(f"envctl: {exc}", file=sys.stderr)
+        return exc.code
+    except KeyboardInterrupt:
+        return EXIT_ERROR
+
+
+if __name__ == "__main__":
+    sys.exit(main())

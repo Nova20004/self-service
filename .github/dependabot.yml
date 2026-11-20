@@ -23,12 +23,38 @@ updates:
     directories:
       - /control-plane
       - /workload-template
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 14
+    ignore:
+      # Stay on the 3.13 line: 3.14/3.15 are semver-minor, 4.x is semver-major.
+      # Patch tags (3.13.x) are still proposed.
+      - dependency-name: python
+        update-types:
+          - version-update:semver-minor
+          - version-update:semver-major
+
+  - package-ecosystem: docker
+    directories:
       - /traefik
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 14
+
+  - package-ecosystem: docker
+    directories:
       - /postgres
     schedule:
       interval: weekly
     cooldown:
       default-days: 14
+    ignore:
+      # Stay on Postgres 17. Minor releases (17.x) are still proposed.
+      - dependency-name: postgres
+        update-types:
+          - version-update:semver-major
 
   - package-ecosystem: docker-compose
     directory: /
@@ -36,3 +62,11 @@ updates:
       interval: weekly
     cooldown:
       default-days: 14
+    # Compose parses fine (anchors and the socket-proxy digest were read).
+    # The job failed because Dependabot looks every image up on Docker Hub,
+    # and the locally built ephemeral-idp/* names answer 401, which fails the
+    # whole run. Only the upstream image is a real dependency.
+    allow:
+      - dependency-name: wollomatic/socket-proxy
+    ignore:
+      - dependency-name: "ephemeral-idp/*"

@@ -68,7 +68,12 @@ jobs:
         run: cd control-plane && python -m pytest --cov --cov-report=term-missing
 
   cli-compat:
-    runs-on: ubuntu-latest
+    # ubuntu-latest is Ubuntu 26.04, and actions/python-versions ships no
+    # CPython 3.9 build for it. The manifest does ship 3.9.25 for linux/24.04
+    # x64 (and 3.13.18, so both matrix legs stay on this runner). The other
+    # jobs stay on ubuntu-latest: they already passed on 26.04, and Dependabot
+    # never bumps a pinned runner image.
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     strategy:
       matrix:

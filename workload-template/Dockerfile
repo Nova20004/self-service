@@ -1,11 +1,11 @@
-FROM python:3.13.18-slim-trixie@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90 AS build
+FROM python:3.15.1-slim-trixie@sha256:533b0b2f9b5d46fd097091cf826f27902f1d6c3bca714b6dc74551356aa97a51 AS build
 ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 COPY requirements.txt /tmp/requirements.txt
 RUN python -m venv /opt/venv \
  && /opt/venv/bin/pip install --no-compile -r /tmp/requirements.txt \
  && /opt/venv/bin/pip uninstall --yes pip
 
-FROM python:3.13.18-slim-trixie@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
+FROM python:3.15.1-slim-trixie@sha256:533b0b2f9b5d46fd097091cf826f27902f1d6c3bca714b6dc74551356aa97a51
 LABEL org.opencontainers.image.title="ephemeral-idp workload template" \
       org.opencontainers.image.source="https://github.com/Nova20004/self-service" \
       org.opencontainers.image.licenses="MIT"

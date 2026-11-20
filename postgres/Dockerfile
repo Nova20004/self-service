@@ -1,7 +1,7 @@
 # Per-environment database image: the pinned upstream Postgres plus Alpine
 # security fixes that are already published but not yet in an upstream tag
 # older than 14 days. See docs/VERSIONS.md and .trivyignore.yaml.
-FROM postgres:17.11-alpine@sha256:e5d2edd28b1f8d40a0a6c0c9cdc545b19b56a0d5d88f94bc11a97d970d4700d0
+FROM postgres:18.4-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
 LABEL org.opencontainers.image.title="ephemeral-idp postgres" \
       org.opencontainers.image.source="https://github.com/Nova20004/self-service" \
       org.opencontainers.image.licenses="MIT"

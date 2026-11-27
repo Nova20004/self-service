@@ -2,7 +2,7 @@
 # dependency, pinned exactly. Resolved with
 #   pip install --uploaded-prior-to <today - 14 days> fastapi uvicorn httpx prometheus-client
 # See docs/VERSIONS.md.
-fastapi==0.162.0
+fastapi==0.162.5
 uvicorn==0.54.0
 httpx==0.28.1
 prometheus_client==0.26.0

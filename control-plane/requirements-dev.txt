@@ -6,7 +6,7 @@ iniconfig==2.3.1
 packaging==26.3
 pluggy==1.7.0
 Pygments==2.21.0
-ruff==0.17.4
+ruff==0.17.5
 mypy==2.4.1
 mypy_extensions==1.2.0
 ast_serialize==0.13.1
